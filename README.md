@@ -20,8 +20,10 @@ The server is esp32 with oled using built in can with CJMCU-230 SN65HVD230 CAN B
 CRX->pin17 CTX->pin5
 BMP280   SCK->PIN15 SDA->4
 OLED is just for debbugging 
-Future add :  - send temp and pressure to nmea2000
-              - fuel flow module
+
+Future add : 
+- send temp and pressure to nmea2000           
+       - fuel flow module
               - chain meter module
               - water dessalator flow meter module
               
