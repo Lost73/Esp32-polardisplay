@@ -1,9 +1,12 @@
 # Esp32-polardisplay
+Sorry for this awfull code, i'm newbie, but it works.
 polar display is the first module
-i want to add more wireless sensor in the future the server is the central node for connection to nmea2000
+i will add more wireless sensor in the future
+the server is the central node for connection to nmea2000
 
-Remote Display for calculated performance from the wind data coming from NMEA2000
-Sorry for this awfull code, i'm newbie, but it works, server is connected via a router but can be set as access point
+Remote Display : for calculated performance from the wind data coming from NMEA2000
+
+server is connected via a router but can be set as access point
 The display is a transflective 1.6"LCD MODULE small but CHEAP and sunlight readable
 connection  led IO4
             sck IO18
