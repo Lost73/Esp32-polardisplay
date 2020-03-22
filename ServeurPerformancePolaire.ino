@@ -173,7 +173,11 @@ void setup() {
   Serial.begin(115200);
   startOLED();
 
-  Serial.begin(115200);
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+  display.println( F("ServeurPolaire"));
+  display.display();
+
   Serial.println(F("BMP280 Baro Sensor et performance"));
 
   if (!bmp.begin()) {
