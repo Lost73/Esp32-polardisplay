@@ -4,6 +4,7 @@ polar display is the first module
 i will add wireless sensor in the future
 the server is the central node for connection to nmea2000, and wireless dispatching
 it's calculating target speed from polar data, the data are sent to external display
+data can be send to a fake nmea sentence as rpm or tank
 
 Remote Display : to display the calculated performance from the wind data coming from NMEA2000 and the polar file of my boat
 
