@@ -28,8 +28,8 @@ SSD1283A tft(/*CS=5*/ SS, /*A0DC=*/ 17, /*RST=*/ 16, /*LED=*/ 4); //hardware spi
 #define WHITE   0xFFFF
 
 // Set your network
-const char* ssid = "freebox_HWWVKE";
-const char* password = "virginie75";
+const char* ssid = "yourssid";
+const char* password = "yourpassword";
 
 //Your IP address or domain name with URL path
 
