@@ -35,8 +35,8 @@ LiquidCrystal_PCF8574 lcd(0x27); // set the LCD address to 0x27 for a 16 chars a
 
 int show = -1;
 // Set your network
-const char* ssid = "freebox_HWWVKE";
-const char* password = "virginie75";
+const char* ssid = "yourssid";
+const char* password = "yourpassword";
 
 //Your IP address or domain name with URL path
 
