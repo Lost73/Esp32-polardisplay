@@ -3,62 +3,92 @@
 // pour le serveur client esp32 https://randomnerdtutorials.com/esp32-client-server-wi-fi/
 // pour le calcul de la vitesse cible https://github.com/cape-io/true-wind/blob/master/true-wind.coffee
 /*BMP280 Barometric/Temp sensor with OLED display
-   I2C
+   I2C ESP32 4 15 SDA 4 SCL 15 SAME AS OLED
    CHANGE ADRESS to 76 IN <Adafruit_BMP280.h> IF NECESSARY
    Wiring Diagram:
-   SDA from BMP and OLED to A4 Pin on Arduino Uno
-   SCL from BMP and OLED to A5 Pin
+   SDA from BMP and OLED to PIN 4
+   SCL from BMP and OLED to PIN 15
    GND to GND
    VCC from BMP and OLED to 3V
 */
 //ESP32 CAN
-#define ESP32_CAN_TX_PIN GPIO_NUM_17
-#define ESP32_CAN_RX_PIN GPIO_NUM_5
-
-
-//MEGA  CAN
-//#define N2k_SPI_CS_PIN 53  // Pin for SPI Can Select
-//#define N2k_CAN_INT_PIN 21 // Use interrupt  and it is connected to pin 21
-//#define USE_MCP_CAN_CLOCK_SET 16  // possible values 8 for 8Mhz and 16 for 16 Mhz clock
-//// #define USE_DUE_CAN 1
-//#define N2K_SOURCE 15
+#define ESP32_CAN_TX_PIN GPIO_NUM_25 //ORANGE
+#define ESP32_CAN_RX_PIN GPIO_NUM_26 //BLANC
+//#define I2C_SDA 33  //DEFAULT 21
+//#define I2C_SCL 32 // DEFAULT 22
 
 #include <Arduino.h>
 #include <NMEA2000_CAN.h>  // This will automatically choose right CAN library and create suitable NMEA2000 object
 #include <N2kMsg.h>
 #include <NMEA2000.h>
 #include <N2kMessages.h>
-
-#include "ESPAsyncWebServer.h"
+#include <HTTPClient.h> //POUR RECUPDONNEES
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <AsyncElegantOTA.h>
 #include "WiFi.h"
 #include <Wire.h>
 #include <SPI.h>
-#include <Adafruit_Sensor.h>  //POUR BMP
-#include <Adafruit_BMP280.h> //POUR BMP
-#include <Adafruit_SSD1306.h> //POUR OLED
+//#include <Adafruit_Sensor.h>  //POUR BMP
+//#include <Adafruit_BMP280.h> //POUR BMP
+//#include <Adafruit_SSD1306.h> //POUR OLED
 #include <Average.h>
 #include <Flash.h>
-//OLED pins
-#define OLED_SDA 4
-#define OLED_SCL 15
-#define OLED_RST 16
-#define SCREEN_WIDTH 128 // OLED display width, in pixels
-#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+
+
+// Meter colour schemes
+#define RED2RED 0
+#define GREEN2GREEN 1
+#define BLUE2BLUE 2
+#define BLUE2RED 3
+#define GREEN2RED 4
+#define RED2GREEN 5
+
+#define TFT_GREY 0x2104 // Dark grey 16 bit colour
+
+#include "alert.h" // Out of range alert icon
+#include <TFT_eSPI.h> // Hardware-specific library
+TFT_eSPI tft = TFT_eSPI();  // Invoke library
+
+// VARIABLE RINGMETER
+uint32_t runTime = -99999;       // time for next update
+int xpos = 0, ypos = 5, gap = 4, radius = 52;
+int reading = 0; // Value to be displayed
+
+boolean range_error = 0;
+int8_t ramp = 1;
+
+
+//Wire.begin(I2C_SDA, I2C_SCL);
+/*//OLED pins
+  #define OLED_SDA 4
+  #define OLED_SCL 15
+  #define OLED_RST 16
+  #define SCREEN_WIDTH 128 // OLED display width, in pixels
+  #define SCREEN_HEIGHT 64 // OLED display height, in pixels
+*/
+#define TFT_GREY 0x5AEB // New colour
 
 // Set your network
-const char* ssid = "yourssid";
-const char* password = "yourpassword";
+const char* SSID = "yourssid";
+const char* PASSWORD = "yourpass";
+
+// POUR HTTP CLIENT
+const char* serverNameReste = "http://192.168.50.35/Reste";
+const char* serverNameDebit = "http://192.168.50.35/Debit";
+String Debit;
+String Reste;
 
 // Create AsyncWebServer object on port 80
 AsyncWebServer server(80);
 
-Adafruit_BMP280 bmp; // use I2C interface
-Adafruit_Sensor *bmp_temp = bmp.getTemperatureSensor();
-Adafruit_Sensor *bmp_pressure = bmp.getPressureSensor();
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RST);
+//Adafruit_BMP280 bmp; // use I2C interface
+//Adafruit_Sensor *bmp_temp = bmp.getTemperatureSensor();
+//Adafruit_Sensor *bmp_pressure = bmp.getPressureSensor();
+//Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RST);
 
 //POLAIRE
-const int itwsSteps = 18; // Number of entries for itws l'idée vient d'ici https://forum.arduino.cc/index.php?topic=8484.15
+const int itwsSteps = 18; // Number of entries for itws
 const long itwsFactor = 10; // Difference between entries for itws
 const int itwsMin = 0; // Value of the first entry for itws
 const int itwsMax = itwsMin + (itwsSteps - 1) * itwsFactor; // Value of the last entry for itws
@@ -98,7 +128,11 @@ FLASH_TABLE(int, Target, itwsSteps ,
 {0, 16, 24, 32, 39, 46, 50,  54,  56,  58,  62,  59,  56,  56, 56,  45, 17, 14});    // 180 115
 
 // ------------------FIN POLAIRE-------------------------
-
+//  -----linear---
+int value[6] = {0, 0, 0, 0, 0, 0};
+int old_value[6] = { -1, -1, -1, -1, -1, -1};
+int d = 0;
+//
 
 int i;
 double awa;
@@ -113,28 +147,32 @@ double target;
 Average<float> avetarget(5); //le chiffre entre parenthèse est le nombre de valeurs utilisées
 String targ;
 
-// TIMER
+//etat nmea2k
+const int nmeaPin = 36;
+int nmeaState = 0;
+int laststate = 0;
+// TIMERS
 unsigned long previousMillis = 0;
-const long interval = 1000; // INTERVALLE RAFRAICHISSEMENT
+unsigned long previousMilliswifi = 0;
+const long intervalwifi = 10000;
+const long interval = 2000; // INTERVALLE RAFRAICHISSEMENT
 
-String readTemp() {
-  return String(float(bmp.readTemperature()), 1);
-}
-String readPres() {
-  return String(float(bmp.readPressure() / 100.0F), 1);
+
+
+String readsog() {
+  return String((sog * 10), 0);
 }
 String readtarget() {
-  return String(targ);
-}
-String readtwa() {
-  return String(twa);
+  return String(avetarget.mean(), 0);
 }
 String readtws() {
-  return String(tws);
+  return String((tws), 1);
 }
-
-
-void startOLED() {
+String readtwa() {
+  return String((RadToDeg(twa)), 0);
+}
+/*
+  void startOLED() {
   //reset OLED display via software
   pinMode(OLED_RST, OUTPUT);
   digitalWrite(OLED_RST, LOW);
@@ -143,12 +181,13 @@ void startOLED() {
 
   //initialize OLED
   Wire.begin(OLED_SDA, OLED_SCL);
-  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3c, false, false)) { // Address 0x3C for 128x64
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3c, false, false)) { // Address 0x3C for 128x32
     Serial.println(F("SSD1306 allocation failed"));
     for (;;); // Don't proceed, loop forever
   }
-}
-
+  //MESS
+  }
+*/
 // List here messages your device will transmit.
 typedef struct {
   unsigned long PGN;
@@ -168,80 +207,70 @@ tNMEA2000Handler NMEA2000Handlers[] = {
   {0, 0}
 };
 
-void setup() {
-
-  Serial.begin(115200);
-  startOLED();
-
-  display.clearDisplay();
-  display.setTextColor(WHITE);
-  display.println( F("ServeurPolaire"));
-  display.display();
-
-  Serial.println(F("BMP280 Baro Sensor et performance"));
-
-  if (!bmp.begin()) {
-    Serial.println(F("Could not find a valid BMP280 sensor, check wiring!"));
-    display.clearDisplay();
-    display.setCursor(0, 20);
-    display.println( F("BMP SENSOR"));
-    display.setCursor(0, 50);
-    display.println( F("NOT FOUND!"));
-    display.display();
-
-    while (1);
+void initWiFi() {
+  // Connect to Wi-Fi network with SSID and PASSWORD
+  tft.print("Connecting to ");
+  tft.println(SSID);
+  WiFi.begin(SSID, PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    tft.print(".");
   }
+  // Print local IP address
+  tft.println("");
+  tft.println("WiFi connected at IP address:");
+  tft.println(WiFi.localIP());
 
-  /* Default settings from datasheet. */
-  bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,     /* Operating Mode. */
-                  Adafruit_BMP280::SAMPLING_X2,     /* Temp. oversampling */
-                  Adafruit_BMP280::SAMPLING_X16,    /* Pressure oversampling */
-                  Adafruit_BMP280::FILTER_X16,      /* Filtering. */
-                  Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
+}
 
-  bmp_temp->printSensorDetails();
+void setup() {
+  tft.init();
+  tft.setRotation(1);
+  Serial.begin(115200);
 
+  // initialize the nmea pin as an input
+  pinMode(nmeaPin, INPUT);
+  tft.fillScreen(TFT_BLACK);
+
+  int xpos = 0, ypos = 5, gap = 4, radius = 52;
+
+  /*
+    if (!bmp.begin()) {
+      Serial.println(F("Could not find a valid BMP280 sensor, check wiring!"));
+
+      tft.print("BMP SENSOR");
+      tft.setCursor(92, 0);
+      tft.print("NOT FOUND!");
+      delay(4000);
+      //while (1);
+    }
+
+  */
   // Do not forward bus messages at all
   //NMEA2000.EnableForward(false);
   NMEA2000.SetMsgHandler(HandleNMEA2000Msg);
   NMEA2000.Open();
 
-  // Connect to Wi-Fi network with SSID and password
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  // Print local IP address and start web server
-
-  Serial.println("WiFi connected.");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
+  initWiFi();
 
   //delay(5000);
 
   // pour acceder aux données depuis un client
-  server.on("/temperature", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send_P(200, "text/plain",  readTemp().c_str());
-  });
-  server.on("/pressure", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send_P(200, "text/plain", readPres().c_str());
+  server.on("/sog", HTTP_GET, [](AsyncWebServerRequest * request) {
+    request->send_P(200, "text/plain", readsog().c_str());
   });
   server.on("/target", HTTP_GET, [](AsyncWebServerRequest * request) {
     request->send_P(200, "text/plain", readtarget().c_str());
   });
-  server.on("/twa", HTTP_GET, [](AsyncWebServerRequest * request) {
-    request->send_P(200, "text/plain", readtwa().c_str());
-  });
   server.on("/tws", HTTP_GET, [](AsyncWebServerRequest * request) {
     request->send_P(200, "text/plain", readtws().c_str());
   });
-
-
+  server.on("/twa", HTTP_GET, [](AsyncWebServerRequest * request) {
+    request->send_P(200, "text/plain", readtwa().c_str());
+  });
+  AsyncElegantOTA.begin(&server);    // Start ElegantOTA
   server.begin();
-
+  tft.fillScreen(TFT_BLACK);
 }
 
 void WindSpeed(const tN2kMsg &N2kMsg) {
@@ -257,6 +286,12 @@ void WindSpeed(const tN2kMsg &N2kMsg) {
     Serial.println(WindAngle);
     aws = msToKnots(WindSpeed);
     awa = WindAngle;
+    if (aws < 0.1)  {
+      aws = 0;
+    }
+    if (awa < 0.1)  {
+      awa = 0;
+    }
   }
 }
 void COGSOGRapid(const tN2kMsg &N2kMsg) {
@@ -299,114 +334,235 @@ void HandleNMEA2000Msg(const tN2kMsg &N2kMsg) {
 }
 
 void loop() {
-  double twa, twd, tws;
+  AsyncElegantOTA.loop();
+  /* // TOUCH TEST_______________
+    uint16_t x, y;
+
+    tft.getTouchRaw(&x, &y);
+    tft.setCursor(122, 0);
+    tft.print((char)248);
+    tft.setCursor(92, 0);
+
+    Serial.printf("X: %i     ", x);
+    Serial.printf("y: %i     ", y);
+
+    Serial.printf("z: %i \n", tft.getTouchRawZ());
+
+    // _____TOUCH TEST
+  */
+
+
+
   NMEA2000.ParseMessages();
   unsigned long currentMillis = millis();
+
+  if ((WiFi.status() != WL_CONNECTED) && (currentMillis - previousMilliswifi >= intervalwifi)) {
+    Serial.print(millis());
+    Serial.println("Reconnecting to WiFi...");
+    WiFi.disconnect();
+    WiFi.reconnect();
+    previousMilliswifi = currentMillis;
+  }
   if (currentMillis - previousMillis >= interval) {
-    // save the last time you blinked the LED
+
     previousMillis = currentMillis;
 
-    i = i + 1;
+// affichage cuve--------------------------------
+    Reste = httpGETRequest(serverNameReste);
+    Debit = httpGETRequest(serverNameDebit);
 
-    display.clearDisplay();
 
-    double temp = bmp.readTemperature();
-    Serial.print(F("Temperature = "));
-    Serial.print(temp, 1); //     ,# sets the number of decimal places
-    Serial.println(" *C");
+    xpos = 180 + 40, ypos = 0, gap = 15, radius = 130;
 
+    
+    reading = Reste.toInt();
+    ringMeter(reading, 0, 570, xpos, ypos, radius, "Litres", GREEN2RED); // Draw analogue meter
+    // affichage débit
+    if ( Debit.toFloat() > 0.01) {
+      tft.drawString(Debit, 350,  290, 6);
+      tft.drawString("Debit", 350,  250, 4);
+    }
+    else {
+      tft.drawString("   --   ", 350,  290, 6);
+      tft.drawString("Debit", 350,  250, 4);
+    }
+    /*  double temp = bmp.readTemperature();
+      Serial.print(F("Temperature = "));
+      Serial.print(temp, 1); //     ,# sets the number of decimal places
+      Serial.println(" *C");
+
+    */
+
+    //affichage nmea si connecté
+    // read the state of the nmea value
+    nmeaState = digitalRead(nmeaPin);
+    //Serial.println(nmeaState);
+    // check if the nmea is on.
+    if ((nmeaState == HIGH ) && (laststate == LOW)){
+     tft.fillScreen(TFT_BLACK);
+    laststate = nmeaState;
+    }
+    if (nmeaState == HIGH) {
+      //LIGNE8 90
+      tft.setCursor(0, 9);
+      tft.print("nmea off ");
+     //tft.fillRect(0, 18, 160, 260, TFT_BLACK);
+
+    }  
+    else {
+      //LIGNE8 90
+      tft.setCursor(0, 9);
+      tft.print("nmea on ");
+      NmeaOn(); //affichage calcul performance
+     laststate = nmeaState;
+    }
 
 
     //LIGNE1
-    display.setCursor(0, 0);
-    display.print( F("Temp: "));
-    display.setCursor(62, 0);
-    display.print(temp, 1); //    ,# sets the number of decimal places
-    display.print(F("   C"));
-    display.setCursor(92, 0);
-    display.print((char)247); // degree symbol
 
-    //LIGNE2
-    double pressure = bmp.readPressure() / 100 ;
-    Serial.print(pressure, 1); //    ,# sets the number of decimal places
-    Serial.println(F(" mB"));
-    display.setCursor(0, 9);
-    display.print( F("Press: "));
-    display.setCursor(62, 9);
-    display.print(pressure, 1); //   ,# sets the number of decimal places
-    display.print(F(" mB"));
-
-    //LIGNE3
-    display.setCursor(0, 18);
-    display.print("TgtS ");//
-    if (aws == 0 && awa == 0) {
-      target = 0;
-    }
-    else {
-      get_true(sog, cog, aws, head, awa, twd, tws, twa);
-      target = (FindTarget((tws * 10), RadToDeg(twa)));
-      avetarget.push(target);
-      // ancie double target = (FindTarget((aws * 10), RadToDeg(awa)));
-    }
-    targ = String(((avetarget.mean()) / 10), 1);
-    if (avetarget.mean() < 10) {
-      targ = String(" " + targ);
-    }
-    display.print((target / 10), 1); //
-    display.setCursor(62, 18);
-    display.print("perf ");//
-    display.print(((sog / target) * 1000), 0);
-
-    //LIGNE4
-    display.setCursor(0, 27);
-    display.print("sog ");
-    display.print(sog);//
-    display.setCursor(62, 27);
-    display.print("COG ");
-    display.print((RadToDeg(cog)), 0);
+    tft.setCursor(0, 0);
+    tft.print(WiFi.localIP());
 
 
-    //LIGNE5 36
-    display.setCursor(0, 36);
-    display.print("Mean ");
-    display.print(targ);
-    //display.print("HDG ");
-    //display.print((RadToDeg(head)), 0); //
-    display.setCursor(62, 36);
-    display.print("twd ");
-    display.print((RadToDeg(twd)), 0);//
+    /*
 
-    //LIGNE6 36
-    display.setCursor(0, 45);
-    display.print("twa ");
-    display.print((RadToDeg(twa)), 0); //
-    display.setCursor(62, 45);
-    display.print("tws ");
-    display.print(tws);//
+        //LIGNE 8 72
 
-    //LIGNE7 54
-    display.setCursor(0, 54);
-    display.print("aws ");
-    display.print(aws);
-    display.setCursor(62, 54);
-    display.print("awa ");
-    if ((RadToDeg(awa)) > 180) {
-      display.print(" - ");
-      display.print((360 - (RadToDeg(awa))), 0);
-    }
-    else {
-      display.print(" ");
-      display.print((RadToDeg(awa)), 0);
-    }
-    display.display();
+        tft.setCursor(0, 72);
+        tft.print( F("Temp: "));
+        tft.setCursor(62, 72);
+        tft.print(temp, 1); //    ,# sets the number of decimal places
+        tft.print(F("   C"));
+        tft.setCursor(92, 72);
+        tft.print((char)247); // degree symbol
+
+      double pressure = bmp.readPressure() / 100 ;
+        tft.setCursor(0, 90);
+        tft.print( F("Press: "));
+        tft.setCursor(62, 90);
+        tft.print(pressure, 1); //   ,# sets the number of decimal places
+        tft.print(F(" mB"));*/
+
   }
 }
 
 
+
+void NmeaOn() {
+
+  //LIGNE3
+
+  tft.setCursor(0, 18);
+  tft.print("TgtS ");//
+  if (aws == 0 && awa == 0) {
+    target = 0;
+  }
+  else {
+    get_true(sog, cog, aws, head, awa, twd, tws, twa);
+    target = (FindTarget((tws * 10), RadToDeg(twa)));
+    avetarget.push(target);
+  }
+  targ = String(((avetarget.mean()) / 10), 1);
+  if (avetarget.mean() < 10) {
+    targ = String(" " + targ);
+  }
+  tft.print((target / 10), 1); //
+  tft.setCursor(62, 18);
+  tft.print("perf ");//
+  value[0] = ((sog / target) * 1000);
+  if (value[0] > 400) {
+   value[0] = 0;
+  }
+  if (value[0] < 100) {
+    tft.drawRightString("    ", 110, 18, 1);
+    tft.drawRightString(String(value[0]), 110, 18, 1);
+  }
+  else {
+    tft.drawRightString(String(value[0]), 110, 18, 1);
+  }
+
+  //LIGNE4
+
+  tft.setCursor(0, 27);
+  tft.print("sog ");
+  tft.print(sog);//
+  tft.print("  ");
+  tft.setCursor(62, 27);
+  tft.print("COG ");
+  tft.print((RadToDeg(cog)), 0);
+  tft.print("  ");
+
+  tft.setCursor(  124, 27);
+  tft.print("twa ");
+  tft.print((RadToDeg(twa)), 0); //
+  tft.print("  ");
+  tft.setCursor(186, 27);
+  tft.print("tws ");
+  tft.print(tws);//
+  tft.print("  ");
+  //LIGNE5 36
+
+  tft.setCursor(0, 36);
+  tft.print("Mean ");
+  tft.print(targ);
+  tft.print("  ");
+  //tft.print("HDG ");
+  //tft.print((RadToDeg(head)), 0); //
+  tft.setCursor(62, 36);
+  tft.print("twd ");
+  tft.print((RadToDeg(twd)), 0);//
+  tft.print("  ");
+
+ 
+  tft.setCursor(124, 36);
+  tft.print("aws ");
+  tft.print(aws);
+  tft.print("  ");
+  tft.setCursor(186, 36);
+  tft.print("awa ");
+  if ((RadToDeg(awa)) > 180) {
+    tft.print(" - ");
+    tft.print((360 - (RadToDeg(awa))), 0);
+    tft.print("  ");
+  }
+  else {
+    tft.print(" ");
+    tft.print((RadToDeg(awa)), 0);
+    tft.print("  ");
+  }
+  // affichage  perf meter--------------------------------
+  xpos =  0, ypos = 140, gap = 15, radius = 80;
+  reading = value[0];
+  ringMeter(reading, 0, 130, xpos, ypos, radius, "perf", BLUE2RED); // Draw analogue meter
+  //_______________affichage target
+  tft.setTextSize(1);
+  tft.setTextPadding(3 * 14); // Allow for 3 digits each 14 pixels wide
+  tft.drawString(targ, xpos + radius, ypos + radius + radius - 15, 4); // Value in middle
+  tft.setTextPadding(0);
+  tft.drawString("target", xpos + radius, ypos + radius + radius, 2); // Units display
+  
+  
+  
+  //_________________affichage sog
+  tft.setTextSize(1);
+  xpos =  160, ypos = 60;
+  tft.setTextPadding(3 * 34); // Allow for 3 digits each 34 pixels wide
+  tft.drawString(String(sog,1), xpos, ypos+40 , 6); // Value in middle
+  tft.setTextPadding(0);
+  tft.drawString("sog", xpos, ypos, 4); // Units display
+//_________________affichage tws
+  tft.setTextSize(1);
+  xpos =  50, ypos = 60;
+  tft.setTextPadding(3 * 34); // Allow for 3 digits each 34 pixels wide
+  tft.drawString(String(tws,1), xpos, ypos+40 , 6); // Value in middle
+  tft.setTextPadding(0);
+  tft.drawString("tws", xpos, ypos, 4); // Units display
+}
+
 void get_true(double C_sog, double C_cog, double C_aws, double C_heading, double C_awa, double & twd, double & tws, double & twa) {
   // calcul twa tws
   // Convert apparent wind speed to units of ships speed.
-    C_aws = C_aws / C_sog;
+  C_aws = C_aws / C_sog;
   if ( C_heading == 0) {
     C_heading = C_cog;
   }
@@ -426,6 +582,9 @@ void get_true(double C_sog, double C_cog, double C_aws, double C_heading, double
   //twd: twd
   //twsr: _.round tspeed, 2
   tws = (tspeed * C_sog); //, 2
+if (tws<0){ 
+  tws=-tws;
+  }
   // fin calcul twa tws
 }
 
@@ -532,4 +691,224 @@ int FindTarget (int rawtws, int rawtwa) { //rawtws en kts x10 rawtwa en degrés 
           + ((fHL * (itwsFactor - itwsOffset)
               + fHH * itwsOffset) * itwaOffset))
          / (itwsFactor * itwaFactor);
+}
+
+String httpGETRequest(const char* serverName) {
+  HTTPClient http;
+
+  // Your IP address with path or Domain name with URL path
+  http.begin(serverName);
+
+  // Send HTTP POST request
+  int httpResponseCode = http.GET();
+
+  String payload = "--";
+
+  if (httpResponseCode > 0) {
+    Serial.print("HTTP Response code: ");
+    Serial.println(httpResponseCode);
+    payload = http.getString();
+  }
+  else {
+    Serial.print("Error code: ");
+    Serial.println(httpResponseCode);
+  }
+  // Free resources
+  http.end();
+
+  return payload;
+}
+
+// #########################################################################
+//  Draw the meter on the screen, returns x coord of righthand side
+// #########################################################################
+int ringMeter(int value, int vmin, int vmax, int x, int y, int r, const char *units, byte scheme)
+{
+  // Minimum value of r is about 52 before value text intrudes on ring
+  // drawing the text first is an option
+
+  x += r; y += r;   // Calculate coords of centre of ring
+
+  int w = r / 3;    // Width of outer ring is 1/4 of radius
+
+  int angle = 150;  // Half the sweep angle of meter (300 degrees)
+
+  int v = map(value, vmin, vmax, -angle, angle); // Map the value to an angle v
+
+  byte seg = 3; // Segments are 3 degrees wide = 100 segments for 300 degrees
+  byte inc = 6; // Draw segments every 3 degrees, increase to 6 for segmented ring
+
+  // Variable to save "value" text colour from scheme and set default
+  int colour = TFT_BLUE;
+
+  // Draw colour blocks every inc degrees
+  for (int i = -angle + inc / 2; i < angle - inc / 2; i += inc) {
+    // Calculate pair of coordinates for segment start
+    float sx = cos((i - 90) * 0.0174532925);
+    float sy = sin((i - 90) * 0.0174532925);
+    uint16_t x0 = sx * (r - w) + x;
+    uint16_t y0 = sy * (r - w) + y;
+    uint16_t x1 = sx * r + x;
+    uint16_t y1 = sy * r + y;
+
+    // Calculate pair of coordinates for segment end
+    float sx2 = cos((i + seg - 90) * 0.0174532925);
+    float sy2 = sin((i + seg - 90) * 0.0174532925);
+    int x2 = sx2 * (r - w) + x;
+    int y2 = sy2 * (r - w) + y;
+    int x3 = sx2 * r + x;
+    int y3 = sy2 * r + y;
+
+    if (i < v) { // Fill in coloured segments with 2 triangles
+      switch (scheme) {
+        case 0: colour = TFT_RED; break; // Fixed colour
+        case 1: colour = TFT_GREEN; break; // Fixed colour
+        case 2: colour = TFT_BLUE; break; // Fixed colour
+        case 3: colour = rainbow(map(i, -angle, angle, 0, 127)); break; // Full spectrum blue to red
+        case 4: colour = rainbow(map(i, -angle, angle, 70, 127)); break; // Green to red (high temperature etc)
+        case 5: colour = rainbow(map(i, -angle, angle, 127, 63)); break; // Red to green (low battery etc)
+        default: colour = TFT_BLUE; break; // Fixed colour
+      }
+      tft.fillTriangle(x0, y0, x1, y1, x2, y2, colour);
+      tft.fillTriangle(x1, y1, x2, y2, x3, y3, colour);
+      //text_colour = colour; // Save the last colour drawn
+    }
+    else // Fill in blank segments
+    {
+      tft.fillTriangle(x0, y0, x1, y1, x2, y2, TFT_GREY);
+      tft.fillTriangle(x1, y1, x2, y2, x3, y3, TFT_GREY);
+    }
+  }
+  // Convert value to a string
+  char buf[10];
+  byte len = 3; if (value > 999) len = 5;
+  dtostrf(value, len, 0, buf);
+  // buf[len] = ' '; buf[len+1] = 0; // Add blanking space and terminator, helps to centre text too!
+  // Set the text colour to default
+  tft.setTextSize(1);
+
+  if (value < vmin || value > vmax) {
+    drawAlert(x, y + 90, 50, 1);
+  }
+  else {
+    drawAlert(x, y + 90, 50, 0);
+  }
+
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  // Uncomment next line to set the text colour to the last segment value!
+  tft.setTextColor(colour, TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+  // Print value, if the meter is large then use big font 8, othewise use 4
+  if (r > 84) {
+    tft.setTextPadding(55 * 3); // Allow for 3 digits each 55 pixels wide
+    tft.drawString(buf, x, y, 8); // Value in middle
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+
+  }
+  else {
+    tft.setTextPadding(3 * 14); // Allow for 3 digits each 14 pixels wide
+    tft.drawString(buf, x, y, 4); // Value in middle
+  }
+  tft.setTextSize(1);
+  tft.setTextPadding(0);
+  // Print units, if the meter is large then use big font 4, othewise use 2
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  if (r > 84) tft.drawString(units, x, y + 60, 4); // Units display
+  else tft.drawString(units, x, y + 15, 2); // Units display
+
+  // Calculate and return right hand side x coordinate
+  return x + r;
+}
+
+void drawAlert(int x, int y , int side, boolean draw)
+{
+  if (draw && !range_error) {
+    drawIcon(alert, x - alertWidth / 2, y - alertHeight / 2, alertWidth, alertHeight);
+    range_error = 1;
+  }
+  else if (!draw) {
+    tft.fillRect(x - alertWidth / 2, y - alertHeight / 2, alertWidth, alertHeight, TFT_BLACK);
+    range_error = 0;
+  }
+}
+
+// #########################################################################
+// Return a 16 bit rainbow colour
+// #########################################################################
+unsigned int rainbow(byte value)
+{
+  // Value is expected to be in range 0-127
+  // The value is converted to a spectrum colour from 0 = blue through to 127 = red
+
+  byte red = 0; // Red is the top 5 bits of a 16 bit colour value
+  byte green = 0;// Green is the middle 6 bits
+  byte blue = 0; // Blue is the bottom 5 bits
+
+  byte quadrant = value / 32;
+
+  if (quadrant == 0) {
+    blue = 31;
+    green = 2 * (value % 32);
+    red = 0;
+  }
+  if (quadrant == 1) {
+    blue = 31 - (value % 32);
+    green = 63;
+    red = 0;
+  }
+  if (quadrant == 2) {
+    blue = 0;
+    green = 63;
+    red = value % 32;
+  }
+  if (quadrant == 3) {
+    blue = 0;
+    green = 63 - 2 * (value % 32);
+    red = 31;
+  }
+  return (red << 11) + (green << 5) + blue;
+}
+
+
+
+//====================================================================================
+// This is the function to draw the icon stored as an array in program memory (FLASH)
+//====================================================================================
+
+// To speed up rendering we use a 64 pixel buffer
+#define BUFF_SIZE 64
+
+// Draw array "icon" of defined width and height at coordinate x,y
+// Maximum icon size is 255x255 pixels to avoid integer overflow
+
+void drawIcon(const unsigned short * icon, int16_t x, int16_t y, int8_t width, int8_t height) {
+
+  uint16_t  pix_buffer[BUFF_SIZE];   // Pixel buffer (16 bits per pixel)
+
+  tft.startWrite();
+
+  // Set up a window the right size to stream pixels into
+  tft.setAddrWindow(x, y, width, height);
+
+  // Work out the number whole buffers to send
+  uint16_t nb = ((uint16_t)height * width) / BUFF_SIZE;
+
+  // Fill and send "nb" buffers to TFT
+  for (int i = 0; i < nb; i++) {
+    for (int j = 0; j < BUFF_SIZE; j++) {
+      pix_buffer[j] = pgm_read_word(&icon[i * BUFF_SIZE + j]);
+    }
+    tft.pushColors(pix_buffer, BUFF_SIZE);
+  }
+
+  // Work out number of pixels not yet sent
+  uint16_t np = ((uint16_t)height * width) % BUFF_SIZE;
+
+  // Send any partial buffer left over
+  if (np) {
+    for (int i = 0; i < np; i++) pix_buffer[i] = pgm_read_word(&icon[nb * BUFF_SIZE + i]);
+    tft.pushColors(pix_buffer, np);
+  }
+
+  tft.endWrite();
 }
